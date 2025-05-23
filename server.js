@@ -64,45 +64,78 @@ console.log('Senha hash para lucas:', users.lucas.password);
 console.log('Verificação de senha:', bcrypt.compareSync(ADMIN_PASSWORD, users.lucas.password));
 console.log('JWT Secret:', JWT_SECRET.substring(0, 10) + '...');
 
-// Fluxos de conversa
+// Novo fluxo de conversas
 const conversationFlows = {
   WELCOME: {
     step: 1,
-    message: (name) => `Olá, ${name}! Que bom que você entrou em contato com a i8Agência Digital 🎉\nSou o Lucas, consultor de marketing — em que posso te ajudar hoje?`,
+    message: (name) =>
+      `Olá, ${name}! 👋\nBem-vindo(a) à i8Agência Digital. Eu sou o Lucas, consultor de marketing.\n\nPara começarmos, me diz: em qual dessas soluções você tem mais interesse?`,
+    nextStep: 'ASK_SERVICE'
+  },
+
+  ASK_SERVICE: {
+    step: 2,
+    message: () =>
+`1️⃣ Criação e Manutenção de Sites e Blogs  
+2️⃣ Desenvolvimento de Lojas Virtuais  
+3️⃣ Aplicativos Mobile (iOS & Android)  
+4️⃣ Sistemas Sob Medida  
+5️⃣ SEO & Marketing de Conteúdo  
+6️⃣ PPC (Google Ads & Facebook Ads)
+
+Digite o número ou o nome da opção.`,
     nextStep: 'DIAGNOSIS'
   },
-  
+
   DIAGNOSIS: {
-    step: 2,
-    message: () => `Para eu te orientar melhor, conta pra mim:\n\n1️⃣ Qual o seu maior desafio hoje? (site lento, pouca visibilidade, pouco engajamento...)\n2️⃣ Você já tem alguma ação de marketing rodando? Se sim, qual?`,
+    step: 3,
+    message: (service = 'seu projeto') =>
+`Ótimo! Sobre *${service}*, me conte por favor:
+
+1️⃣ Qual o principal desafio que você enfrenta hoje?  
+2️⃣ Você já tentou algo nessa área? Se sim, como foi a experiência?`,
     nextStep: 'VALUE_OFFER'
   },
-  
+
   VALUE_OFFER: {
-    step: 3,
-    message: () => `Legal, obrigado pelas informações!\n\nPelo que você me falou, sugiro começarmos com uma análise gratuita de SEO e performance do seu site. Em até 24h te envio um relatório com os pontos de melhoria — tudo sem compromisso.`,
+    step: 4,
+    message: () =>
+`Perfeito, obrigado pelas infos! 🚀  
+Com base no que você me falou, sugiro começarmos com uma análise gratuita e personalizada.  
+Em até 24 h você recebe um relatório com pontos de melhoria e oportunidades — sem compromisso.`,
     nextStep: 'SUCCESS_CASE'
   },
-  
+
   SUCCESS_CASE: {
-    step: 4,
-    message: () => `Pra você ver um exemplo real: atendemos a Empresa X no segmento de e-commerce e, em 2 meses, dobramos o tráfico orgânico e aumentamos em 30% a geração de leads.\n\nGostaria de saber mais sobre como conseguimos isso?`,
+    step: 5,
+    message: () =>
+`Para você ter uma ideia: trabalhamos com a *Smart Air* no segmento de e-commerce e, em 2 meses, dobramos o tráfego orgânico e aumentamos em 30% a geração de leads.  
+Quer saber como fizemos isso?`,
     nextStep: 'SCHEDULE_CALL'
   },
-  
+
   SCHEDULE_CALL: {
-    step: 5,
-    message: () => `Se fizer sentido pra você, podemos agendar uma call de 15 min na semana que vem para conversarmos com calma sobre estratégia e valores.\n\nQual dia/horário funciona melhor pra você?`,
+    step: 6,
+    message: () =>
+`Se fizer sentido, podemos agendar uma call rápida de 15 min para alinharmos estratégia e orçamento.  
+Que dia/horário funciona melhor para você?`,
     nextStep: 'COMPLETED'
   }
 };
 
-// Respostas para objeções
+// Respostas a objeções — mais empáticas e direcionadas
 const objectionResponses = {
-  'não tenho orçamento': 'Entendo totalmente. Podemos criar um plano enxuto e escalável, começando com apenas os itens essenciais — assim você rende mais sem precisar de um investimento alto de início.',
-  'quero pensar': 'Claro! Que tal marcarmos uma mini-call de 10 min para tirar todas as suas dúvidas antes de você tomar a decisão? Sem compromisso.',
-  'não tenho tempo': 'Perfeito! Nosso processo é pensado para empresários ocupados. Cuidamos de tudo pra você — você só precisa aprovar as estratégias.',
-  'já tenho agência': 'Que bom! Como está sendo a experiência? Às vezes uma segunda opinião ou complemento pode fazer toda diferença nos resultados.'
+  'não tenho orçamento': 
+    'Entendo. Podemos começar com um plano enxuto e escalável, focando no essencial para gerar resultado rápido. Quer que eu monte uma proposta básica para você?',
+  
+  'quero pensar': 
+    'Sem problemas! Que tal uma mini-call de 10 min para esclarecer todas as suas dúvidas, sem compromisso?',
+  
+  'não tenho tempo': 
+    'Compreendo. Nosso processo é pensado para quem tem agenda apertada: cuidamos de tudo e entregamos relatórios práticos. Qual o melhor canal para eu te manter atualizado?',
+  
+  'já tenho agência': 
+    'Que ótimo! Posso oferecer um diagnóstico externo ou complementar o que eles já fazem, trazendo novas ideias para acelerar seus resultados.'
 };
 
 // Inicializar cliente WhatsApp
@@ -215,9 +248,10 @@ async function handleMessage(message) {
     );
 
     if (objection) {
-      await sendMessage(customerPhone, objectionResponses[objection]);
+      const reply = objectionResponses[objection];
+      await sendMessage(customerPhone, reply);
       customer.messages.push({
-        text: objectionResponses[objection],
+        text: reply,
         timestamp: new Date(),
         type: 'sent'
       });
@@ -256,7 +290,10 @@ async function handleMessage(message) {
 
       const currentFlow = conversationFlows[conversation.step];
       if (currentFlow && currentFlow.nextStep !== 'COMPLETED') {
-        const responseMsg = currentFlow.message();
+        // Se for o diagnóstico, passamos o texto anterior para personalizar
+        const responseMsg = conversation.step === 'DIAGNOSIS'
+          ? currentFlow.message(conversation.responses.find(r => r.step === 'ASK_SERVICE').response)
+          : currentFlow.message();
         await sendMessage(customerPhone, responseMsg);
         customer.messages.push({
           text: responseMsg,
@@ -594,3 +631,6 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error);
 });
+
+// Inicializa o cliente WhatsApp assim que este arquivo for executado
+initializeWhatsApp();
