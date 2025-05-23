@@ -149,7 +149,7 @@ function initializeWhatsApp() {
       dataPath: './whatsapp-session'
     }),
     puppeteer: {
-      headless: true,
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -315,19 +315,27 @@ async function handleMessage(message) {
 // Enviar mensagem
 async function sendMessage(to, message) {
   if (!isClientReady) {
-    console.log('❌ Cliente não está pronto para enviar mensagem');
-    return false;
+    console.log('⏳ Aguardando cliente ficar pronto antes de enviar...');
+    await new Promise(resolve => {
+      const check = setInterval(() => {
+        if (isClientReady) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 500);
+    });
   }
 
   try {
     await client.sendMessage(to, message);
-    console.log(`✅ Mensagem enviada para ${to}: ${message.substring(0, 50)}...`);
+    console.log(`✅ Mensagem enviada para ${to}`);
     return true;
   } catch (error) {
     console.error('❌ Erro ao enviar mensagem:', error);
     return false;
   }
 }
+
 
 // Middleware de autenticação
 function authenticateToken(req, res, next) {
