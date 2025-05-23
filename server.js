@@ -45,6 +45,7 @@ let client;
 let qrCodeData = '';
 let isClientReady = false;
 let clientStatus = 'disconnected';
+let isInitializing = false;
 
 // Banco de dados simples em memória
 const users = {
@@ -138,10 +139,50 @@ const objectionResponses = {
     'Que ótimo! Posso oferecer um diagnóstico externo ou complementar o que eles já fazem, trazendo novas ideias para acelerar seus resultados.'
 };
 
+// Função para aguardar que o cliente esteja pronto
+async function waitForClientReady(maxWaitTime = 30000) {
+  const startTime = Date.now();
+  
+  while (!isClientReady && (Date.now() - startTime) < maxWaitTime) {
+    if (clientStatus === 'error' || clientStatus === 'auth_failure') {
+      throw new Error(`Cliente WhatsApp em estado de erro: ${clientStatus}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  
+  if (!isClientReady) {
+    throw new Error('Timeout aguardando cliente WhatsApp ficar pronto');
+  }
+}
+
+// Função para verificar se o cliente está em condições de enviar mensagens
+async function isClientHealthy() {
+  try {
+    if (!client || !isClientReady) {
+      return false;
+    }
+    
+    // Tentar obter informações básicas do cliente
+    const info = await client.info;
+    return !!info;
+  } catch (error) {
+    console.log('❌ Cliente não está saudável:', error.message);
+    return false;
+  }
+}
+
 // Inicializar cliente WhatsApp
 function initializeWhatsApp() {
+  if (isInitializing) {
+    console.log('⏳ Cliente já está sendo inicializado...');
+    return;
+  }
+  
   console.log('Inicializando cliente WhatsApp...');
+  isInitializing = true;
   clientStatus = 'initializing';
+  isClientReady = false;
+  qrCodeData = '';
   
   client = new Client({
     authStrategy: new LocalAuth({
@@ -160,8 +201,12 @@ function initializeWhatsApp() {
         '--single-process',
         '--disable-gpu',
         '--disable-web-security',
-        '--disable-features=VizDisplayCompositor'
-      ]
+        '--disable-features=VizDisplayCompositor',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding'
+      ],
+      timeout: 60000
     }
   });
 
@@ -178,11 +223,21 @@ function initializeWhatsApp() {
     });
   });
 
-  client.on('ready', () => {
+  client.on('ready', async () => {
     console.log('✅ Cliente WhatsApp está pronto!');
     isClientReady = true;
+    isInitializing = false;
     clientStatus = 'ready';
     qrCodeData = '';
+    
+    // Verificar se o cliente está realmente funcional
+    try {
+      const info = await client.info;
+      console.log('📱 WhatsApp conectado:', info.pushname);
+    } catch (error) {
+      console.log('⚠️ Cliente pronto mas com problemas:', error.message);
+    }
+    
     io.emit('ready');
   });
 
@@ -195,21 +250,41 @@ function initializeWhatsApp() {
   client.on('auth_failure', (msg) => {
     console.error('❌ Falha na autenticação:', msg);
     clientStatus = 'auth_failure';
+    isInitializing = false;
+    isClientReady = false;
     io.emit('auth_failure', msg);
   });
 
   client.on('disconnected', (reason) => {
     console.log('❌ Cliente desconectado:', reason);
     isClientReady = false;
+    isInitializing = false;
     clientStatus = 'disconnected';
     io.emit('disconnected', reason);
+    
+    // Tentar reconectar após 10 segundos
+    setTimeout(() => {
+      if (!isClientReady && clientStatus === 'disconnected') {
+        console.log('🔄 Tentando reconectar...');
+        initializeWhatsApp();
+      }
+    }, 10000);
   });
 
   client.on('message', handleMessage);
 
+  // Inicializar com tratamento de erro
   client.initialize().catch(err => {
     console.error('Erro ao inicializar cliente:', err);
     clientStatus = 'error';
+    isInitializing = false;
+    isClientReady = false;
+    
+    // Tentar reinicializar após 15 segundos em caso de erro
+    setTimeout(() => {
+      console.log('🔄 Tentando reinicializar após erro...');
+      initializeWhatsApp();
+    }, 15000);
   });
 }
 
@@ -249,12 +324,16 @@ async function handleMessage(message) {
 
     if (objection) {
       const reply = objectionResponses[objection];
-      await sendMessage(customerPhone, reply);
-      customer.messages.push({
-        text: reply,
-        timestamp: new Date(),
-        type: 'sent'
-      });
+      const success = await sendMessage(customerPhone, reply);
+      
+      if (success) {
+        customer.messages.push({
+          text: reply,
+          timestamp: new Date(),
+          type: 'sent'
+        });
+      }
+      
       io.emit('conversation_update', { phone: customerPhone, customer });
       return;
     }
@@ -272,12 +351,15 @@ async function handleMessage(message) {
       conversations.set(customerPhone, conversation);
       
       const welcomeMsg = conversationFlows.WELCOME.message(customerName);
-      await sendMessage(customerPhone, welcomeMsg);
-      customer.messages.push({
-        text: welcomeMsg,
-        timestamp: new Date(),
-        type: 'sent'
-      });
+      const success = await sendMessage(customerPhone, welcomeMsg);
+      
+      if (success) {
+        customer.messages.push({
+          text: welcomeMsg,
+          timestamp: new Date(),
+          type: 'sent'
+        });
+      }
       
       conversation.step = conversationFlows.WELCOME.nextStep;
     } else {
@@ -292,14 +374,18 @@ async function handleMessage(message) {
       if (currentFlow && currentFlow.nextStep !== 'COMPLETED') {
         // Se for o diagnóstico, passamos o texto anterior para personalizar
         const responseMsg = conversation.step === 'DIAGNOSIS'
-          ? currentFlow.message(conversation.responses.find(r => r.step === 'ASK_SERVICE').response)
+          ? currentFlow.message(conversation.responses.find(r => r.step === 'ASK_SERVICE')?.response || 'seu projeto')
           : currentFlow.message();
-        await sendMessage(customerPhone, responseMsg);
-        customer.messages.push({
-          text: responseMsg,
-          timestamp: new Date(),
-          type: 'sent'
-        });
+          
+        const success = await sendMessage(customerPhone, responseMsg);
+        
+        if (success) {
+          customer.messages.push({
+            text: responseMsg,
+            timestamp: new Date(),
+            type: 'sent'
+          });
+        }
         
         conversation.step = currentFlow.nextStep;
       }
@@ -309,33 +395,65 @@ async function handleMessage(message) {
     io.emit('conversation_update', { phone: customerPhone, customer, conversation });
   } catch (error) {
     console.error('Erro ao processar mensagem:', error);
+    
+    // Verificar se é erro relacionado ao cliente
+    if (error.message.includes('WidFactory') || error.message.includes('Cannot read properties')) {
+      console.log('🔄 Erro do cliente WhatsApp detectado, marcando como não pronto...');
+      isClientReady = false;
+      clientStatus = 'error';
+    }
   }
 }
 
-// Enviar mensagem
-async function sendMessage(to, message) {
-  if (!isClientReady) {
-    console.log('⏳ Aguardando cliente ficar pronto antes de enviar...');
-    await new Promise(resolve => {
-      const check = setInterval(() => {
-        if (isClientReady) {
-          clearInterval(check);
-          resolve();
+// Enviar mensagem com retry e verificações
+async function sendMessage(to, message, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Verificar se o cliente está pronto
+      if (!isClientReady) {
+        console.log(`⏳ Tentativa ${attempt}: Aguardando cliente ficar pronto...`);
+        await waitForClientReady(15000); // Aguardar até 15 segundos
+      }
+      
+      // Verificar se o cliente está saudável
+      const healthy = await isClientHealthy();
+      if (!healthy) {
+        throw new Error('Cliente não está em condições de enviar mensagens');
+      }
+
+      // Tentar enviar a mensagem
+      await client.sendMessage(to, message);
+      console.log(`✅ Mensagem enviada para ${to} (tentativa ${attempt})`);
+      return true;
+      
+    } catch (error) {
+      console.error(`❌ Erro ao enviar mensagem (tentativa ${attempt}/${retries}):`, error.message);
+      
+      if (attempt === retries) {
+        console.error('❌ Todas as tentativas de envio falharam');
+        
+        // Se é erro relacionado ao WidFactory, marcar cliente como não pronto
+        if (error.message.includes('WidFactory') || error.message.includes('Cannot read properties')) {
+          console.log('🔄 Erro crítico detectado, reiniciando cliente...');
+          isClientReady = false;
+          clientStatus = 'error';
+          
+          // Reinicializar cliente em background
+          setTimeout(() => {
+            initializeWhatsApp();
+          }, 5000);
         }
-      }, 500);
-    });
+        
+        return false;
+      }
+      
+      // Aguardar antes da próxima tentativa
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
   }
-
-  try {
-    await client.sendMessage(to, message);
-    console.log(`✅ Mensagem enviada para ${to}`);
-    return true;
-  } catch (error) {
-    console.error('❌ Erro ao enviar mensagem:', error);
-    return false;
-  }
+  
+  return false;
 }
-
 
 // Middleware de autenticação
 function authenticateToken(req, res, next) {
@@ -409,6 +527,7 @@ app.get('/api/status', authenticateToken, (req, res) => {
   const status = {
     isReady: isClientReady,
     clientStatus: clientStatus,
+    isInitializing: isInitializing,
     totalConversations: conversations.size,
     totalCustomers: customerData.size,
     timestamp: new Date().toISOString()
@@ -532,10 +651,15 @@ app.post('/api/restart-whatsapp', authenticateToken, async (req, res) => {
     console.log('🔄 Reiniciando cliente WhatsApp...');
     
     if (client) {
-      await client.destroy();
+      try {
+        await client.destroy();
+      } catch (error) {
+        console.log('⚠️ Erro ao destruir cliente anterior:', error.message);
+      }
     }
     
     isClientReady = false;
+    isInitializing = false;
     clientStatus = 'restarting';
     qrCodeData = '';
     
@@ -560,6 +684,12 @@ io.on('connection', (socket) => {
       socket.emit('qr', qrCodeData);
     } else if (isClientReady) {
       socket.emit('ready');
+    } else {
+      socket.emit('status', { 
+        clientStatus, 
+        isInitializing, 
+        message: 'Cliente WhatsApp não está pronto' 
+      });
     }
   });
 
@@ -582,7 +712,8 @@ app.get('/api/test', (req, res) => {
     message: 'Servidor funcionando!',
     timestamp: new Date().toISOString(),
     status: clientStatus,
-    isReady: isClientReady
+    isReady: isClientReady,
+    isInitializing: isInitializing
   });
 });
 
@@ -640,5 +771,5 @@ process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error);
 });
 
-// Inicializa o cliente WhatsApp assim que este arquivo for executado
-initializeWhatsApp();
+// Não inicializar automaticamente no final do arquivo
+// A inicialização será feita após o servidor estar rodando
